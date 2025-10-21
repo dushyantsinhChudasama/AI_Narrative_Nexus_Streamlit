@@ -1,26 +1,30 @@
 import streamlit as st
 import pandas as pd
 from docx import Document
-import io
-import chardet
+import io, re, chardet, string, html
+from bs4 import BeautifulSoup
+from langdetect import detect
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import PorterStemmer, WordNetLemmatizer
+import spacy
+from collections import Counter
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="AI Narrative Nexus", layout="wide")
+# --- Setup ---
+st.set_page_config(page_title="AI Narrative Nexus", layout="centered")
+nltk.download('stopwords')
+nltk.download('punkt')
+nltk.download('punkt_tab')
+nltk.download('wordnet')
+nlp = spacy.load('en_core_web_sm')
 
-st.title("🧠 AI Narrative Nexus – Dynamic Text Analysis Platform")
-st.subheader("Week 1: Data Collection & Input Handling")
-
-st.markdown("""
-Upload one or more text files, CSVs, or Word documents — or paste text manually.
-The app will display the file information and text preview.
-""")
-
-# Function to read text safely
+# --- File reading helpers ---
 def read_txt(uploaded_file):
     raw = uploaded_file.read()
-    detected = chardet.detect(raw)
-    encoding = detected['encoding'] or 'utf-8'
-    text = raw.decode(encoding, errors='replace')
-    return text
+    enc = chardet.detect(raw)['encoding'] or 'utf-8'
+    return raw.decode(enc, errors='replace')
 
 def read_csv(uploaded_file):
     try:
@@ -36,43 +40,111 @@ def read_docx(uploaded_file):
     doc = Document(uploaded_file)
     return "\n".join([p.text for p in doc.paragraphs])
 
-# User input
-uploaded_files = st.file_uploader("📂 Upload files (.txt, .csv, .docx)", type=["txt", "csv", "docx"], accept_multiple_files=True)
-pasted_text = st.text_area("✏️ Or paste text manually below (optional):")
+# --- NEW: Clean raw HTML and decode ---
+def clean_html(text):
+    soup = BeautifulSoup(text, "html.parser")
+    cleaned = soup.get_text(separator=" ")
+    decoded = html.unescape(cleaned)
+    return decoded
 
-if st.button("Process"):
-    if not uploaded_files and not pasted_text.strip():
-        st.warning("Please upload at least one file or paste some text.")
+# --- Text Cleaning and Normalization ---
+def clean_text(text):
+    text = clean_html(text)  # remove HTML & decode
+    text = re.sub(r"http\S+", "", text)            # remove URLs
+    text = re.sub(r'[^A-Za-z\s]', ' ', text)       # keep only letters
+    text = re.sub(r'\s+', ' ', text)               # normalize spaces
+    return text.lower().strip()
+
+def remove_stopwords(tokens):
+    stop_words = set(stopwords.words('english'))
+    return [t for t in tokens if t not in stop_words and len(t) > 2]
+
+def stem_tokens(tokens):
+    stemmer = PorterStemmer()
+    return [stemmer.stem(t) for t in tokens]
+
+def lemmatize_tokens(tokens):
+    lemmatizer = WordNetLemmatizer()
+    return [lemmatizer.lemmatize(t) for t in tokens]
+
+def process_text(text, mode='lemmatize'):
+    try:
+        lang = detect(text)
+        if lang != 'en':
+            st.warning("⚠️ Skipped non-English text detected.")
+            return []
+    except:
+        pass
+
+    cleaned = clean_text(text)
+    tokens = word_tokenize(cleaned)
+    tokens = remove_stopwords(tokens)
+    if mode == 'stem':
+        tokens = stem_tokens(tokens)
     else:
-        all_texts = []
-        for uploaded_file in uploaded_files:
-            name = uploaded_file.name
-            ext = name.split('.')[-1].lower()
-            size = len(uploaded_file.getvalue()) / 1024  # in KB
-            
-            # Read file
-            if ext == "txt":
-                text = read_txt(uploaded_file)
-            elif ext == "csv":
-                text = read_csv(uploaded_file)
-            elif ext == "docx":
-                text = read_docx(uploaded_file)
-            else:
-                st.error(f"Unsupported file type: {ext}")
-                continue
+        tokens = lemmatize_tokens(tokens)
+    return tokens
 
-            st.success(f"✅ Uploaded: {name} ({size:.2f} KB)")
-            st.write("**Preview:**")
-            st.text(text[:1000])  # show first 1000 chars
-            all_texts.append(text)
+def show_word_frequency(tokens, top_n=15):
+    if not tokens:
+        return
+    freq = Counter(tokens)
+    common = freq.most_common(top_n)
+    words, counts = zip(*common)
+    fig, ax = plt.subplots()
+    ax.bar(words, counts)
+    ax.set_xticklabels(words, rotation=45, ha='right')
+    ax.set_title("Top Word Frequencies")
+    st.pyplot(fig)
 
-        if pasted_text.strip():
-            st.info("📋 Included pasted text content")
-            st.text(pasted_text[:1000])
-            all_texts.append(pasted_text)
+# --- Streamlit UI ---
+st.title("🧠 AI Narrative Nexus - Text analysis")
+st.markdown("Now with HTML removal, emoji cleaning, and English filtering!")
 
-        if all_texts:
-            st.success("🎉 All data sources processed successfully!")
-            combined = "\n\n---\n\n".join(all_texts)
-            st.session_state['combined_text'] = combined  # save for later weeks
-            st.download_button("⬇️ Download combined text", data=combined, file_name="combined_text.txt")
+uploaded_files = st.file_uploader("📂 Upload files (.txt, .csv, .docx)", type=["txt", "csv", "docx"], accept_multiple_files=True)
+pasted_text = st.text_area("✏️ Or paste text manually (optional):")
+
+mode = st.radio("Choose normalization technique:", ["Lemmatization", "Stemming"])
+
+if st.button("Run Preprocessing"):
+    all_texts = []
+    for uploaded_file in uploaded_files:
+        ext = uploaded_file.name.split('.')[-1].lower()
+        if ext == 'txt':
+            text = read_txt(uploaded_file)
+        elif ext == 'csv':
+            text = read_csv(uploaded_file)
+        elif ext == 'docx':
+            text = read_docx(uploaded_file)
+        else:
+            st.warning(f"Unsupported file: {uploaded_file.name}")
+            continue
+        all_texts.append(text)
+        st.success(f"Loaded file: {uploaded_file.name}")
+
+    if pasted_text.strip():
+        all_texts.append(pasted_text)
+        st.info("Included pasted text.")
+
+    if not all_texts:
+        st.warning("No text provided.")
+    else:
+        combined_text = "\n".join(all_texts)
+        st.subheader("Original Text Sample (Before Cleaning):")
+        st.write(combined_text[:1000])
+
+        # --- Process ---
+        norm_mode = 'stem' if mode == 'Stemming' else 'lemmatize'
+        tokens = process_text(combined_text, mode=norm_mode)
+        st.success(f"Processed {len(tokens)} tokens successfully!")
+
+        st.subheader("Cleaned & Tokenized Sample:")
+        st.write(" ".join(tokens[:100]))
+
+        # --- Visualization ---
+        st.subheader("📊 Word Frequency Chart")
+        show_word_frequency(tokens, top_n=15)
+
+        # --- Token download ---
+        joined_tokens = " ".join(tokens)
+        st.download_button("⬇️ Download Cleaned Text", joined_tokens, file_name="cleaned_text.txt")
